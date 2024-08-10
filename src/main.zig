@@ -6,7 +6,6 @@ const ray = @cImport({
 
 const fitbasetype = @import("fitbasetype.zig");
 const fittypes = @import("fittypes.zig");
-const meta = @import("meta.zig");
 
 const FITBaseType = fitbasetype.FITBaseType;
 
@@ -626,6 +625,158 @@ const FITFile = struct {
     }
 };
 
+const Coordinates = struct {
+    lat: f32,
+    lon: f32,
+
+    pub fn for_tile(tile: Tile) Coordinates {
+        const n: f32 = @floatFromInt(@shlExact(@as(u32, 1), tile.zoom));
+        const lon_deg: f32 = @as(f32, @floatFromInt(tile.x)) / n * 360.0 - 180.0;
+        const lat_rad = std.math.atan(std.math.sinh(std.math.pi * (1.0 - 2.0 * @as(f32, @floatFromInt(tile.y)) / n)));
+        const lat_deg = std.math.radiansToDegrees(lat_rad);
+        return Coordinates{ .lat = lat_deg, .lon = lon_deg };
+    }
+
+    pub fn on_tile(this: Coordinates, tile: Tile) bool {
+        const sw = Coordinates.for_tile(Tile{ .x = tile.x, .y = tile.y + 1, .zoom = tile.zoom });
+        const ne = Coordinates.for_tile(Tile{ .x = tile.x + 1, .y = tile.y, .zoom = tile.zoom });
+        return this.in_box(sw, ne);
+    }
+
+    pub fn in_box(this: Coordinates, box: Box) bool {
+        return box.has(this);
+    }
+};
+
+const Box = struct {
+    sw: Coordinates,
+    ne: Coordinates,
+
+    pub fn for_tile(tile: Tile) Box {
+        const sw = Tile{ .zoom = tile.zoom, .x = tile.x, .y = tile.y + 1 };
+        const ne = Tile{ .zoom = tile.zoom, .x = tile.x + 1, .y = tile.y };
+        return Box{ .sw = sw, .ne = ne };
+    }
+
+    pub fn with_margins(this: Box, margin: f32) Box {
+        const mid = this.center();
+        const f = 1.0 + margin;
+        return Box{
+            .sw = Coordinates{ .lon = mid.lon - (this.width() * f) / 2.0, .lat = mid.lat - (this.height() * f) / 2.0 },
+            .ne = Coordinates{ .lon = mid.lon + (this.width() * f) / 2.0, .lat = mid.lat + (this.height() * f) / 2.0 },
+        };
+    }
+
+    pub fn center(this: Box) Coordinates {
+        return Coordinates{ .lat = (this.sw.lat + this.ne.lat) / 2.0, .lon = (this.sw.lon + this.ne.lon) / 2.0 };
+    }
+
+    pub fn width(this: Box) f32 {
+        return this.ne.lon - this.sw.lon;
+    }
+
+    pub fn height(this: Box) f32 {
+        return this.ne.lat - this.sw.lat;
+    }
+
+    pub fn contains(this: Box, other: Box) bool {
+        return this.has(other.sw) and this.has(other.ne);
+    }
+
+    pub fn has(this: Box, point: Coordinates) bool {
+        return point.lat >= this.sw.lat and point.lon >= this.sw.lon and point.lat <= this.ne.lat and point.lon <= this.ne.lon;
+    }
+};
+
+const Tile = struct {
+    x: u32,
+    y: u32,
+    zoom: u5,
+
+    pub fn for_coordinates(pos: Coordinates, zoom: u5) Tile {
+        const lat_rad = std.math.degreesToRadians(pos.lat);
+        const n = @as(f32, @floatFromInt(@as(u32, @shlExact(@as(u32, 1), zoom))));
+        const xtile: u32 = @intFromFloat((pos.lon + 180.0) / 360.0 * n);
+        const ytile: u32 = @intFromFloat((1.0 - std.math.asinh(@tan(lat_rad)) / std.math.pi) / 2.0 * n);
+        return Tile{ .zoom = zoom, .x = xtile, .y = ytile };
+    }
+
+    pub fn box(this: Tile) Box {
+        const sw = Coordinates.for_tile(Tile{ .x = this.x, .y = this.y + 1, .zoom = this.zoom });
+        const ne = Coordinates.for_tile(Tile{ .x = this.x + 1, .y = this.y, .zoom = this.zoom });
+        return Box{ .sw = sw, .ne = ne };
+    }
+
+    pub fn get_map(this: Tile, allocator: std.mem.Allocator) ![]const u8 {
+        var buf: [64]u8 = undefined;
+        var headers: [4096]u8 = undefined;
+        const url = std.fmt.bufPrint(&buf, "https://tile.openstreetmap.org/{}/{}/{}.png", .{ this.zoom, this.x, this.y }) catch std.debug.panic("Out of Memory", .{});
+        var client = std.http.Client{ .allocator = allocator };
+        defer client.deinit();
+        const uri = std.Uri.parse(url) catch unreachable;
+        var request = try client.open(.GET, uri, .{ .server_header_buffer = &headers });
+        defer request.deinit();
+        try request.send();
+        try request.wait();
+        return request.reader().readAllAlloc(allocator, 1024 * 1024);
+    }
+};
+
+const Atlas = struct {
+    zoom: u5,
+    x: u32,
+    y: u32,
+    maps: ?[9][]const u8 = null,
+
+    pub fn for_box(b: Box) Atlas {
+        var zoom: u5 = 15;
+        const mid = b.center();
+        while (zoom > 0) {
+            const mid_tile = Tile.for_coordinates(mid, zoom);
+            const tile_box = mid_tile.box();
+            if (tile_box.width() > b.width() and tile_box.height() > b.height()) {
+                zoom += 1;
+                const t = Tile.for_coordinates(mid, zoom);
+                return Atlas{
+                    .zoom = zoom,
+                    .x = t.x - 1,
+                    .y = t.y - 1,
+                };
+            }
+            zoom -= 1;
+        }
+        unreachable;
+    }
+
+    fn tile(this: Atlas, ix: usize) Tile {
+        std.debug.assert(ix < 9);
+        const i: u32 = @intCast(ix);
+        return Tile{ .zoom = this.zoom, .x = this.x + i % 3, .y = this.y + i / 3 };
+    }
+
+    pub fn get_maps(this: *Atlas, allocator: std.mem.Allocator) ![9][]const u8 {
+        if (this.maps) |ret| {
+            return ret;
+        }
+        const maps: [9][]const u8 = undefined;
+        this.maps = maps;
+        for (0..9) |ix| {
+            this.maps.?[ix] = try this.tile(ix).get_map(allocator);
+        }
+        return this.maps.?;
+    }
+
+    pub fn box(this: Atlas) Box {
+        const t_sw = Tile{ .zoom = this.zoom, .x = this.x, .y = this.y + 2 };
+        const t_ne = Tile{ .zoom = this.zoom, .x = this.x + 2, .y = this.y };
+        return Box{ .sw = t_sw.box().sw, .ne = t_ne.box().ne };
+    }
+
+    pub fn sub_box(this: Atlas, ix: usize) Box {
+        return this.tile(ix).box();
+    }
+};
+
 pub fn main() !void {
     // Get an allocator.
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -633,14 +784,14 @@ pub fn main() !void {
     const allocator = arena.allocator();
 
     const args = try std.process.argsAlloc(allocator);
-    if (args.len != 2) {
-        std.log.err(
-            "Incorrect number of arguments: wanted 2, got {d}",
-            .{args.len},
-        );
-        return ProgramError.WrongAmountOfArguments;
-    }
-    const filename = args[1];
+    // if (args.len != 2) {
+    //     std.log.err(
+    //         "Incorrect number of arguments: wanted 2, got {d}",
+    //         .{args.len},
+    //     );
+    //     return ProgramError.WrongAmountOfArguments;
+    // }
+    const filename = if (args.len == 2) args[1] else "Easy_Wednesday_Workout_Neg_Split_Intervals.fit";
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fs.realpathZ(filename, &path_buffer);
@@ -654,6 +805,10 @@ pub fn main() !void {
     var records = std.ArrayList(fittypes.record).init(allocator);
     var min_altitude: f32 = 10000;
     var max_altitude: f32 = -500;
+    var min_lat: f32 = 100.0;
+    var max_lat: f32 = -100.0;
+    var min_long: f32 = 200.0;
+    var max_long: f32 = -200.0;
 
     var last_time: u32 = 0;
     for (fitfile.messages.items, 0..) |message, ix| {
@@ -665,6 +820,12 @@ pub fn main() !void {
                     min_altitude = @min(min_altitude, alt);
                     max_altitude = @max(max_altitude, alt);
                 }
+                if (@abs(record.position_lat) > 0.1 and @abs(record.position_long) > 0.1) {
+                    min_lat = @min(min_lat, record.position_lat);
+                    max_lat = @max(max_lat, record.position_lat);
+                    min_long = @min(min_long, record.position_long);
+                    max_long = @max(max_long, record.position_long);
+                }
                 try records.append(record);
                 last_time = record.timestamp;
             },
@@ -674,16 +835,99 @@ pub fn main() !void {
     const min_time: u32 = @intCast(records.items[0].timestamp);
     const dt: u32 = @intCast(records.items[records.items.len - 1].timestamp - min_time);
     const dalt: u32 = @intFromFloat(max_altitude - min_altitude);
+    _ = dt;
+    _ = dalt;
+
+    const sw = Coordinates{ .lat = min_lat, .lon = min_long };
+    const ne = Coordinates{ .lat = max_lat, .lon = max_long };
+    const route_box = Box{ .sw = sw, .ne = ne };
+    const mid = route_box.center();
+    std.debug.print("SW: {}, {}\n", .{ sw.lat, sw.lon });
+    std.debug.print("NE: {}, {}\n", .{ ne.lat, ne.lon });
+    const dpos = @max(max_lat - min_lat, max_long - min_long);
+    _ = dpos;
+    const b = Box{ .sw = sw, .ne = ne };
+    var atlas = Atlas.for_box(b.with_margins(0.1));
+    var map: [9]ray.Image = undefined;
+    for (try atlas.get_maps(allocator), 0..) |m, ix| {
+        map[ix] = ray.LoadImageFromMemory(".png", m.ptr, @intCast(m.len));
+    }
+
+    var m = ray.ImageCopy(map[0]);
+    ray.UnloadImage(map[0]);
+    ray.ImageResizeCanvas(&m, 768, 768, 0, 0, ray.WHITE);
+    for (1..9) |ix| {
+        ray.ImageDraw(&m, map[ix], ray.Rectangle{ .x = 0, .y = 0, .width = 256, .height = 256 }, ray.Rectangle{ .x = @floatFromInt((ix % 3) * 256), .y = @floatFromInt((ix / 3) * 256), .width = 256, .height = 256 }, ray.WHITE);
+        ray.UnloadImage(map[ix]);
+    }
+
+    const box = atlas.box();
+    ray.ImageDrawLine(&m, 0, 256, 768, 256, ray.GREEN);
+    ray.ImageDrawLine(&m, 0, 512, 768, 512, ray.GREEN);
+    ray.ImageDrawLine(&m, 256, 0, 256, 768, ray.GREEN);
+    ray.ImageDrawLine(&m, 512, 0, 512, 768, ray.GREEN);
+
+    const r = ray.Rectangle{
+        .x = (sw.lon - box.sw.lon) / box.width() * 768,
+        .y = (1.0 - (ne.lat - box.sw.lat) / box.height()) * 768,
+        .width = (ne.lon - sw.lon) / box.width() * 768,
+        .height = (ne.lat - sw.lat) / box.height() * 768,
+    };
+    const fat = ray.Rectangle{
+        .x = r.x * 0.95,
+        .y = r.y * 0.95,
+        .width = r.width * 1.1,
+        .height = r.height * 1.1,
+    };
+    const square = ray.Rectangle{
+        .x = if (fat.height > fat.width) (fat.x + fat.width / 2) - fat.height / 2 else fat.x,
+        .y = if (fat.height < fat.width) (fat.y + fat.height / 2) - fat.width / 2 else fat.y,
+        .width = @max(fat.width, fat.height),
+        .height = @max(fat.width, fat.height),
+    };
+
+    ray.ImageDrawRectangleLines(&m, r, 2, ray.SKYBLUE);
+    ray.ImageDrawRectangleLines(&m, fat, 2, ray.PINK);
+    ray.ImageDrawRectangleLines(&m, square, 2, ray.DARKBLUE);
+    ray.ImageDrawCircleV(&m, .{
+        .x = (mid.lon - box.sw.lon) / box.width() * 768,
+        .y = (1.0 - (mid.lat - box.sw.lat) / box.height()) * 768,
+    }, 3, ray.BLACK);
+
+    var prev_x: ?f32 = null;
+    var prev_y: ?f32 = null;
+    for (records.items, 0..) |record, ix| {
+        if (ix == 0) {
+            continue;
+        }
+        if (@abs(record.position_lat) < 0.1 or @abs(record.position_long) < 0.1) {
+            continue;
+        }
+        const dlat = 1.0 - (record.position_lat - box.sw.lat) / box.height();
+        const dlon = (record.position_long - box.sw.lon) / box.width();
+        const x: f32 = 768 * dlon;
+        const y: f32 = 768 * dlat;
+        if (prev_x != null) {
+            ray.ImageDrawLineV(&m, ray.Vector2{ .x = prev_x.?, .y = prev_y.? }, ray.Vector2{ .x = x, .y = y }, ray.RED);
+        }
+        prev_x = x;
+        prev_y = y;
+    }
+    ray.ImageCrop(&m, square);
+    ray.ImageResize(&m, 256, 256);
 
     std.debug.print("Read {} messages\n", .{fitfile.messages.items.len});
     std.debug.print("Read {} records\n", .{records.items.len});
 
     const screenWidth = 800;
-    const screenHeight = 450;
+    const screenHeight = 800;
 
     ray.InitWindow(screenWidth, screenHeight, "raylib [core] example - basic window");
     defer ray.CloseWindow();
 
+    const texture = ray.LoadTextureFromImage(m);
+    defer ray.UnloadTexture(texture);
+    ray.UnloadImage(m);
     ray.SetTargetFPS(60);
 
     var frame: u32 = 0;
@@ -693,23 +937,40 @@ pub fn main() !void {
         defer ray.EndDrawing();
 
         ray.ClearBackground(ray.DARKGRAY);
+        ray.DrawTexture(texture, 20, 20, ray.WHITE);
 
-        var prev_x: ?c_int = null;
-        var prev_y: ?c_int = null;
-        for (records.items, 0..) |record, ix| {
-            const x: c_int = @intCast(20 + 760 * (record.timestamp - min_time) / dt);
-            const alt = record.enhanced_altitude;
-            if (ix > 0 and alt > -100 and alt < 5000) {
-                if (frame == 0 and ix < 50) {
-                    std.debug.print("ix: {} min_alt: {} alt: {} dalt: {}\n", .{ ix, min_altitude, alt, dalt });
-                }
-                const y: c_int = @intCast(430 - 410 * @as(u32, @intFromFloat(alt - min_altitude)) / dalt);
-                if (prev_x != null) {
-                    ray.DrawLine(prev_x.?, prev_y.?, x, y, ray.RAYWHITE);
-                }
-                prev_x = x;
-                prev_y = y;
-            }
-        }
+        // var prev_x: ?c_int = null;
+        // var prev_y: ?c_int = null;
+        // for (records.items, 0..) |record, ix| {
+        //     if (ix == 0) {
+        //         continue;
+        //     }
+        //     if (@abs(record.position_lat) < 0.1 or @abs(record.position_long) < 0.1) {
+        //         continue;
+        //     }
+        //     if (frame == 0 and ix < 50) {
+        //         std.debug.print("ix: {} lat: {} lon: {}\n", .{ ix, record.position_lat, record.position_long });
+        //     }
+        //     const x: c_int = 20 + @as(c_int, @intFromFloat(@as(f32, @floatFromInt(screenHeight - 40)) * (record.position_long - min_long) / dpos));
+        //     const y: c_int = screenHeight - (20 + @as(c_int, @intFromFloat(@as(f32, @floatFromInt(screenHeight - 40)) * (record.position_lat - min_lat) / dpos)));
+        //     if (prev_x != null) {
+        //         ray.DrawLine(prev_x.?, prev_y.?, x, y, ray.RAYWHITE);
+        //     }
+        //     prev_x = x;
+        //     prev_y = y;
+        //    const x: c_int = @intCast(20 + 760 * (record.timestamp - min_time) / dt);
+        //    const alt = record.enhanced_altitude;
+        //     if (ix > 0 and alt > -100 and alt < 5000) {
+        //         if (frame == 0 and ix < 50) {
+        //             std.debug.print("ix: {} min_alt: {} alt: {} dalt: {}\n", .{ ix, min_altitude, alt, dalt });
+        //         }
+        //         const y: c_int = @intCast(430 - 410 * @as(u32, @intFromFloat(alt - min_altitude)) / dalt);
+        //         if (prev_x != null) {
+        //             ray.DrawLine(prev_x.?, prev_y.?, x, y, ray.RAYWHITE);
+        //         }
+        //         prev_x = x;
+        //         prev_y = y;
+        //     }
+        //}
     }
 }

@@ -86,6 +86,7 @@ pub const FieldDef = struct {
     base_type: FITBaseType,
     field_type: FieldType,
     name: []const u8,
+    unit: []const u8,
     is_array: bool,
     scale: f32 = 0,
     offset: f32 = 0,
@@ -120,6 +121,7 @@ pub const FieldDef = struct {
             .is_array = is_array,
             .scale = scale,
             .offset = offset,
+            .unit = "",
         };
     }
 
@@ -145,6 +147,7 @@ pub const FieldDef = struct {
             .is_array = is_array,
             .scale = 1.0,
             .offset = 0.0,
+            .unit = "",
         };
     }
 
@@ -198,7 +201,11 @@ pub const FieldDef = struct {
                     if (this.field_type == .Enumeration) {
                         this.print("  this.@\"{s}\" = @enumFromInt(v);\n", .{this.name});
                     } else {
-                        this.print("  this.@\"{s}\" = v;\n", .{this.name});
+                        if (std.mem.eql(u8, this.unit, "semicircles")) {
+                            this.print("  this.@\"{s}\" = @as(f32, @floatFromInt(v)) * (180.0 / @as(f32, @floatFromInt(@as(u32, @shlExact(1, 31)))));\n", .{this.name});
+                        } else {
+                            this.print("  this.@\"{s}\" = v;\n", .{this.name});
+                        }
                     }
                 } else {
                     this.print("  this.@\"{s}\" = @as(f32, @floatFromInt(v)) / {} - {};\n", .{ this.name, this.scale, this.offset });
@@ -301,7 +308,7 @@ pub const MessageDef = struct {
             }
             switch (fld.field_type) {
                 .BaseType => {
-                    const type_name = if (fld.scale != 1.0 or fld.offset != 0.0) "f32" else fld.base_type.zig_type_name();
+                    const type_name = if (fld.scale != 1.0 or fld.offset != 0.0 or std.mem.eql(u8, fld.unit, "semicircles")) "f32" else fld.base_type.zig_type_name();
                     this.print("{s},\n", .{type_name});
                 },
                 .Enumeration => |enumeration| this.print("@\"{s}\",\n", .{enumeration}),
@@ -459,22 +466,6 @@ const FITProfile = struct {
             \\const DataField = main.DataField;
             \\const DataFieldValue = main.DataFieldValue;
             \\
-            \\pub const FieldComponent = struct {{
-            \\    name: []const u8,
-            \\    scale: f32 = 1.0,
-            \\    offset: f32 = 0.0,
-            \\    bits: u8 = 16,
-            \\}};
-            \\
-            \\pub const FieldMapEntry = struct {{
-            \\    field_name: []const u8,
-            \\    field_num: u32,
-            \\    is_array: bool,
-            \\    scale: f32,
-            \\    offset: f32,
-            \\    components: []const FieldComponent = &[0]FieldComponent{{}},
-            \\}};
-            \\
             \\
         , .{});
         return ret;
@@ -590,75 +581,81 @@ pub fn handle_messages(this: *FITProfile, tokens: [][]const u8) void {
         this.current_message = this.messages.addOne() catch @panic("Memory Allocation error");
         this.current_message.?.init(this, tokens[0]) catch @panic("Memory allocation error");
     } else if (tokens[1].len > 0) {
-        if (this.current_message) |msg| {
-            const field_num = std.fmt.parseInt(u16, tokens[1], 0) catch std.debug.panic("{s}.{s}: Invalid field number", .{ msg.name, tokens[2] });
-            if (tokens[5].len == 0) {
-                const scale = if (tokens[6].len > 0) std.fmt.parseFloat(f32, tokens[6]) catch
-                    std.debug.panic("{s}.{s}: Invalid scale '{s}'", .{ msg.name, tokens[2], tokens[6] }) else 1.0;
-                const offset = if (tokens[7].len > 0) std.fmt.parseFloat(f32, tokens[7]) catch
-                    std.debug.panic("{s}.{s}: Invalid offset '{s}'", .{ msg.name, tokens[2], tokens[7] }) else 0.0;
-                const fld = FieldDef.init(msg, field_num, tokens[2], tokens[3], tokens[4].len > 0, scale, offset) catch |err|
-                    std.debug.panic("Cannot add field {s} to message {s}: {any}", .{ tokens[2], msg.name, err });
-                msg.fields.append(fld) catch @panic("Memory allocation error");
-            } else {
-                var fld = FieldDef.init_aggregate(msg, field_num, tokens[2], tokens[3], tokens[4].len > 0) catch |err|
-                    std.debug.panic("Cannot add aggregate field {s} to message {s}: {any}", .{ tokens[2], msg.name, err });
-                var components = &fld.field_type.Aggregate;
-                const comps = if (tokens[5][0] == '"') tokens[5][1 .. tokens[5].len - 1] else tokens[5];
-                var comp_it = std.mem.splitScalar(u8, comps, ',');
-                while (comp_it.next()) |c| {
-                    components.append(Component{
-                        .name = this.allocator.dupe(u8, c) catch std.debug.panic("Memory allocation error", .{}),
-                    }) catch |err|
-                        std.debug.panic("Could not add aggregate component: {any}", .{err});
-                }
-                if (tokens[6].len > 0) {
-                    const scales = if (tokens[6][0] == '"') tokens[6][1 .. tokens[6].len - 1] else tokens[6];
-                    var scale_it = std.mem.splitScalar(u8, scales, ',');
-                    var ix: u8 = 0;
-                    while (scale_it.next()) |s| {
-                        if (ix >= components.items.len) {
-                            std.debug.panic("{s}.{s}: Overflow component scale '{s}'", .{ msg.name, tokens[2], s });
-                        }
-                        components.items[ix].scale = std.fmt.parseFloat(f32, s) catch std.debug.panic("{s}.{s}: Invalid component scale '{s}'", .{ msg.name, tokens[2], s });
-                        ix += 1;
-                    }
-                    if (ix < components.items.len) {
-                        std.debug.panic("{s}.{s}: Component scale underflow", .{ msg.name, tokens[2] });
-                    }
-                }
-                if (tokens[7].len > 0) {
-                    const offsets = if (tokens[7][0] == '"') tokens[7][1 .. tokens[7].len - 1] else tokens[7];
-                    var offset_it = std.mem.splitScalar(u8, offsets, ',');
-                    var ix: u8 = 0;
-                    while (offset_it.next()) |o| {
-                        if (ix >= fld.field_type.Aggregate.items.len) {
-                            std.debug.panic("{s}.{s}: Overflow component offset '{s}'", .{ msg.name, tokens[2], o });
-                        }
-                        components.items[ix].offset = std.fmt.parseFloat(f32, o) catch std.debug.panic("{s}.{s}: Invalid component offset '{s}'", .{ msg.name, tokens[2], o });
-                        ix += 1;
-                    }
-                    if (ix < components.items.len) {
-                        std.debug.panic("{s}.{s}: Component offset underflow", .{ msg.name, tokens[2] });
-                    }
-                }
-                if (tokens[9].len > 0) {
-                    const bits = if (tokens[9][0] == '"') tokens[9][1 .. tokens[9].len - 1] else tokens[9];
-                    var bits_it = std.mem.splitScalar(u8, bits, ',');
-                    var ix: u8 = 0;
-                    while (bits_it.next()) |b| {
-                        if (ix >= fld.field_type.Aggregate.items.len) {
-                            std.debug.panic("{s}.{s}: Overflow component bit size '{s}'", .{ msg.name, tokens[2], b });
-                        }
-                        components.items[ix].bits = std.fmt.parseInt(u8, b, 0) catch std.debug.panic("{s}.{s}: Invalid component bit size '{s}'", .{ msg.name, tokens[2], b });
-                        ix += 1;
-                    }
-                    if (ix < components.items.len) {
-                        std.debug.panic("{s}.{s}: Component bit size underflow", .{ msg.name, tokens[2] });
-                    }
-                }
-                msg.fields.append(fld) catch std.debug.panic("Memory allocation error", .{});
+        var msg = this.current_message orelse return;
+        const field_num = std.fmt.parseInt(u16, tokens[1], 0) catch std.debug.panic("{s}.{s}: Invalid field number", .{ msg.name, tokens[2] });
+        var fld: FieldDef = undefined;
+        if (tokens[5].len == 0) {
+            const scale = if (tokens[6].len > 0) std.fmt.parseFloat(f32, tokens[6]) catch
+                std.debug.panic("{s}.{s}: Invalid scale '{s}'", .{ msg.name, tokens[2], tokens[6] }) else 1.0;
+            const offset = if (tokens[7].len > 0) std.fmt.parseFloat(f32, tokens[7]) catch
+                std.debug.panic("{s}.{s}: Invalid offset '{s}'", .{ msg.name, tokens[2], tokens[7] }) else 0.0;
+            fld = FieldDef.init(msg, field_num, tokens[2], tokens[3], tokens[4].len > 0, scale, offset) catch |err|
+                std.debug.panic("Cannot add field {s} to message {s}: {any}", .{ tokens[2], msg.name, err });
+            if (tokens[8].len > 0) {
+                fld.unit = this.allocator.dupe(u8, tokens[8]) catch std.debug.panic("Out of Memory", .{});
             }
+            msg.fields.append(fld) catch @panic("Memory allocation error");
+        } else {
+            fld = FieldDef.init_aggregate(msg, field_num, tokens[2], tokens[3], tokens[4].len > 0) catch |err|
+                std.debug.panic("Cannot add aggregate field {s} to message {s}: {any}", .{ tokens[2], msg.name, err });
+            var components = &fld.field_type.Aggregate;
+            const comps = if (tokens[5][0] == '"') tokens[5][1 .. tokens[5].len - 1] else tokens[5];
+            var comp_it = std.mem.splitScalar(u8, comps, ',');
+            while (comp_it.next()) |c| {
+                components.append(Component{
+                    .name = this.allocator.dupe(u8, c) catch std.debug.panic("Memory allocation error", .{}),
+                }) catch |err|
+                    std.debug.panic("Could not add aggregate component: {any}", .{err});
+            }
+            if (tokens[6].len > 0) {
+                const scales = if (tokens[6][0] == '"') tokens[6][1 .. tokens[6].len - 1] else tokens[6];
+                var scale_it = std.mem.splitScalar(u8, scales, ',');
+                var ix: u8 = 0;
+                while (scale_it.next()) |s| {
+                    if (ix >= components.items.len) {
+                        std.debug.panic("{s}.{s}: Overflow component scale '{s}'", .{ msg.name, tokens[2], s });
+                    }
+                    components.items[ix].scale = std.fmt.parseFloat(f32, s) catch std.debug.panic("{s}.{s}: Invalid component scale '{s}'", .{ msg.name, tokens[2], s });
+                    ix += 1;
+                }
+                if (ix < components.items.len) {
+                    std.debug.panic("{s}.{s}: Component scale underflow", .{ msg.name, tokens[2] });
+                }
+            }
+            if (tokens[7].len > 0) {
+                const offsets = if (tokens[7][0] == '"') tokens[7][1 .. tokens[7].len - 1] else tokens[7];
+                var offset_it = std.mem.splitScalar(u8, offsets, ',');
+                var ix: u8 = 0;
+                while (offset_it.next()) |o| {
+                    if (ix >= fld.field_type.Aggregate.items.len) {
+                        std.debug.panic("{s}.{s}: Overflow component offset '{s}'", .{ msg.name, tokens[2], o });
+                    }
+                    components.items[ix].offset = std.fmt.parseFloat(f32, o) catch std.debug.panic("{s}.{s}: Invalid component offset '{s}'", .{ msg.name, tokens[2], o });
+                    ix += 1;
+                }
+                if (ix < components.items.len) {
+                    std.debug.panic("{s}.{s}: Component offset underflow", .{ msg.name, tokens[2] });
+                }
+            }
+            if (tokens[9].len > 0) {
+                const bits = if (tokens[9][0] == '"') tokens[9][1 .. tokens[9].len - 1] else tokens[9];
+                var bits_it = std.mem.splitScalar(u8, bits, ',');
+                var ix: u8 = 0;
+                while (bits_it.next()) |b| {
+                    if (ix >= fld.field_type.Aggregate.items.len) {
+                        std.debug.panic("{s}.{s}: Overflow component bit size '{s}'", .{ msg.name, tokens[2], b });
+                    }
+                    components.items[ix].bits = std.fmt.parseInt(u8, b, 0) catch std.debug.panic("{s}.{s}: Invalid component bit size '{s}'", .{ msg.name, tokens[2], b });
+                    ix += 1;
+                }
+                if (ix < components.items.len) {
+                    std.debug.panic("{s}.{s}: Component bit size underflow", .{ msg.name, tokens[2] });
+                }
+            }
+            if (tokens[8].len > 0) {
+                fld.unit = this.allocator.dupe(u8, tokens[8]) catch std.debug.panic("Out of Memory", .{});
+            }
+            msg.fields.append(fld) catch std.debug.panic("Memory allocation error", .{});
         }
     }
 }
