@@ -1,0 +1,8 @@
+.DS_Store
+.vscode/
+.zig-cache/
+*.fit
+FitSDKRelease_21.141.00 2/
+src/fittypes.zig
+zig-out/
+
