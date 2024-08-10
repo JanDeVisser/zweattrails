@@ -461,10 +461,10 @@ const FITProfile = struct {
             \\const std = @import("std");
             \\const fitbasetype = @import("fitbasetype.zig");
             \\const FITBaseType = fitbasetype.FITBaseType;
-            \\const main = @import("main.zig");
-            \\const DataRecord = main.DataRecord;
-            \\const DataField = main.DataField;
-            \\const DataFieldValue = main.DataFieldValue;
+            \\const fit = @import("fit.zig");
+            \\const DataRecord = fit.DataRecord;
+            \\const DataField = fit.DataField;
+            \\const DataFieldValue = fit.DataFieldValue;
             \\
             \\
         , .{});
