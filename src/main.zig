@@ -708,6 +708,10 @@ const Tile = struct {
     }
 
     pub fn get_map(this: Tile, allocator: std.mem.Allocator) ![]const u8 {
+        const cached_map = try this.get_cached_map(allocator);
+        if (cached_map) |map| {
+            return map;
+        }
         var buf: [64]u8 = undefined;
         var headers: [4096]u8 = undefined;
         const url = std.fmt.bufPrint(&buf, "https://tile.openstreetmap.org/{}/{}/{}.png", .{ this.zoom, this.x, this.y }) catch std.debug.panic("Out of Memory", .{});
@@ -718,7 +722,52 @@ const Tile = struct {
         defer request.deinit();
         try request.send();
         try request.wait();
-        return request.reader().readAllAlloc(allocator, 1024 * 1024);
+        std.debug.print("downloading tile map {s}\n", .{url});
+        const map = try request.reader().readAllAlloc(allocator, 1024 * 1024);
+        try this.cache_map(map, allocator);
+        return map;
+    }
+
+    fn get_cache_dir(this: Tile, allocator: std.mem.Allocator) !std.fs.Dir {
+        const app_dir = try std.fs.getAppDataDir(allocator, "zweattrails");
+        std.fs.makeDirAbsolute(app_dir) catch |err| {
+            if (err != std.posix.MakeDirError.PathAlreadyExists) {
+                return err;
+            }
+        };
+        var d = try std.fs.openDirAbsolute(app_dir, .{});
+        defer d.close();
+        var tilecache = try d.makeOpenPath("tilecache", .{});
+        defer tilecache.close();
+        const z: []const u8 = try std.fmt.allocPrint(allocator, "{}", .{this.zoom});
+        defer allocator.free(z);
+        return tilecache.makeOpenPath(z, .{});
+    }
+
+    fn get_cached_map(this: Tile, allocator: std.mem.Allocator) !?[]const u8 {
+        var cache_dir = try this.get_cache_dir(allocator);
+        defer cache_dir.close();
+        const fname = try std.fmt.allocPrint(allocator, "{}-{}.png", .{ this.x, this.y });
+        defer allocator.free(fname);
+        var cache_file = cache_dir.openFile(fname, .{}) catch |err| {
+            if (err == std.fs.File.OpenError.FileNotFound) {
+                return null;
+            }
+            return err;
+        };
+        defer cache_file.close();
+        std.debug.print("loading cached tile map {s}\n", .{fname});
+        return try cache_file.readToEndAlloc(allocator, 1024 * 1024);
+    }
+
+    fn cache_map(this: Tile, map: []const u8, allocator: std.mem.Allocator) !void {
+        var cache_dir = try this.get_cache_dir(allocator);
+        defer cache_dir.close();
+        const fname = try std.fmt.allocPrint(allocator, "{}-{}.png", .{ this.x, this.y });
+        defer allocator.free(fname);
+        const cache_file = try cache_dir.createFile(fname, .{});
+        defer cache_file.close();
+        return cache_file.writeAll(map);
     }
 };
 
@@ -874,8 +923,8 @@ pub fn main() !void {
         .height = (ne.lat - sw.lat) / box.height() * 768,
     };
     const fat = ray.Rectangle{
-        .x = r.x * 0.95,
-        .y = r.y * 0.95,
+        .x = r.x - (r.width * 0.05),
+        .y = r.y - (r.height * 0.05),
         .width = r.width * 1.1,
         .height = r.height * 1.1,
     };
