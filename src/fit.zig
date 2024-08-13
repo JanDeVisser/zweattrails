@@ -93,15 +93,23 @@ const DeveloperFieldDefinition = struct {
 };
 
 const RecordDefinition = struct {
+    allocator: std.mem.Allocator,
     local_message_type: u4,
     little_endian: bool,
     global_message_number: u16,
     num_fields: u8,
     fields: []FieldDefinition,
     num_developer_fields: u8 = 0,
-    developer_fields: []DeveloperFieldDefinition = &[0]DeveloperFieldDefinition{},
+    developer_fields: ?[]DeveloperFieldDefinition = null,
     mesg_num: ?fittypes.mesg_num,
     mesg_type: []const u8,
+
+    pub fn deinit(this: RecordDefinition) void {
+        this.allocator.free(this.fields);
+        if (this.developer_fields) |developer_fields| {
+            this.allocator.free(developer_fields);
+        }
+    }
 
     pub fn decode(fitfile: *FITFile, hdr: u8) !RecordDefinition {
         const has_developer_data = hdr & 0x20 == 0x20;
@@ -124,6 +132,7 @@ const RecordDefinition = struct {
 
         const num_fields = fitfile.read(u8, little_endian) catch return error.NoDefinitionNumberOfFields;
         var ret = RecordDefinition{
+            .allocator = fitfile.allocator,
             .local_message_type = @intCast(hdr & 0x0F),
             .little_endian = little_endian,
             .global_message_number = global_message_number,
@@ -138,7 +147,6 @@ const RecordDefinition = struct {
             const base_type_int = try fitfile.read(u8, little_endian);
             const base_type: ?FITBaseType = FITBaseType.from_int(base_type_int);
             if (base_type == null) {
-                std.debug.print("mesg_num {} field {} base_type {2x:002} ⚡️⚡️\n", .{ global_message_number, field_definition_number, base_type_int });
                 continue;
             }
             ret.fields[ix] = FieldDefinition{
@@ -158,7 +166,7 @@ const RecordDefinition = struct {
             ret.num_developer_fields = fitfile.read(u8, little_endian) catch return error.NoDefinitionNumberOfDeveloperFields;
             ret.developer_fields = try fitfile.allocator.alloc(DeveloperFieldDefinition, ret.num_developer_fields);
             for (0..ret.num_developer_fields) |ix| {
-                ret.developer_fields[ix] = DeveloperFieldDefinition{
+                ret.developer_fields.?[ix] = DeveloperFieldDefinition{
                     .field_number = try fitfile.read(u8, little_endian),
                     .size = try fitfile.read(u8, little_endian),
                     .developer_data_index = try fitfile.read(u8, little_endian),
@@ -210,6 +218,14 @@ const DataFieldValue = union(FITBaseType) {
     string: []u8,
     byte: []u8,
     bool: bool,
+
+    pub fn deinit(this: DataFieldValue, allocator: std.mem.Allocator) void {
+        switch (this) {
+            inline .string => |s| allocator.free(s),
+            inline .byte => |b| allocator.free(b),
+            inline else => {},
+        }
+    }
 
     pub fn dump(this: DataFieldValue) void {
         switch (this) {
@@ -308,6 +324,18 @@ pub const DataField = struct {
         array_field: []DataFieldValue,
     },
 
+    pub fn deinit(this: DataField, allocator: std.mem.Allocator) void {
+        switch (this.value) {
+            .scalar_field => |fld| fld.deinit(allocator),
+            .array_field => |arr| {
+                for (arr) |fld| {
+                    fld.deinit(allocator);
+                }
+                allocator.free(arr);
+            },
+        }
+    }
+
     pub fn dump(this: DataField) void {
         switch (this.value) {
             inline .scalar_field => |value| value.dump(),
@@ -365,6 +393,14 @@ pub const DataRecord = struct {
     global_message_number: u16,
     fields: []DataField,
 
+    pub fn deinit(this: DataRecord) void {
+        this.definition.deinit();
+        for (this.fields) |fld| {
+            fld.deinit(this.allocator);
+        }
+        this.allocator.free(this.fields);
+    }
+
     pub fn dump(this: *const DataRecord) void {
         std.debug.print("{s}: {} ({}): ", .{ this.definition.mesg_type, this.global_message_number, this.definition.local_message_type });
         for (this.fields) |fld| {
@@ -403,8 +439,10 @@ pub const DataRecord = struct {
                 }
             }
         }
-        for (def.developer_fields) |fld| {
-            _ = try fitfile.read_bytes(fld.size);
+        if (def.developer_fields) |dev_flds| {
+            for (dev_flds) |fld| {
+                _ = try fitfile.read_bytes(fld.size);
+            }
         }
         return ret;
     }
@@ -470,8 +508,10 @@ pub const DataRecord = struct {
                 }
             }
         }
-        for (def.developer_fields) |fld| {
-            _ = try fitfile.read_bytes(fld.size);
+        if (def.developer_fields) |dev_flds| {
+            for (dev_flds) |fld| {
+                _ = try fitfile.read_bytes(fld.size);
+            }
         }
         return ret;
     }
@@ -479,7 +519,6 @@ pub const DataRecord = struct {
     var count: u32 = 0;
 
     fn create_message_by_name(this: DataRecord, comptime name: []const u8) !fittypes.FITMessage {
-        std.debug.print("{} Reading {s}\n", .{ count, name });
         count += 1;
         inline for (@typeInfo(fittypes).Struct.decls) |decl| {
             if (std.mem.eql(u8, decl.name, name) and @hasField(fittypes.FITMessage, decl.name)) {
@@ -491,7 +530,6 @@ pub const DataRecord = struct {
 
     pub fn create_message(this: DataRecord) !fittypes.FITMessage {
         const mesg_num = this.definition.mesg_num orelse {
-            std.debug.print("Unknown mesg_num {}\n", .{this.definition.global_message_number});
             return error.UnknownMessage;
         };
         inline for (@typeInfo(fittypes.mesg_num).Enum.fields) |enum_fld| {
@@ -515,7 +553,11 @@ pub const FITFile = struct {
     header: FITHeader = undefined,
     bytes_read: usize,
 
-    pub fn init(allocator: std.mem.Allocator, file: std.fs.File) !FITFile {
+    pub fn init(allocator: std.mem.Allocator, filename: []const u8) !FITFile {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fs.realpath(filename, &path_buffer);
+        const file = try std.fs.openFileAbsolute(path, .{});
+        defer file.close();
         var ret = FITFile{
             .allocator = allocator,
             .file = file,
@@ -525,11 +567,23 @@ pub const FITFile = struct {
             .messages = std.ArrayList(fittypes.FITMessage).init(allocator),
             .bytes_read = 0,
         };
+        errdefer ret.deinit();
         ret.header = try FITHeader.decode(&ret);
+        try ret.read_all();
         return ret;
     }
 
-    pub fn read_bytes(this: *FITFile, length: u16) ![]u8 {
+    pub fn deinit(this: *FITFile) void {
+        this.messages.deinit();
+        for (this.data.items) |data| {
+            data.deinit();
+        }
+        this.data.deinit();
+        this.developer_data_ids.deinit();
+        this.developer_fields.deinit();
+    }
+
+    fn read_bytes(this: *FITFile, length: u16) ![]u8 {
         const buf = try this.allocator.alloc(u8, length);
         const sz = try this.file.reader().read(buf);
         if (sz < length) {
@@ -555,7 +609,7 @@ pub const FITFile = struct {
         return @bitCast(std.mem.bigToNative(IntType, value));
     }
 
-    pub fn read_string(this: *FITFile) ![]u8 {
+    fn read_string(this: *FITFile) ![]u8 {
         var buf = std.ArrayList(u8).init(this.allocator);
         while (true) {
             var ch = [_]u8{0};
@@ -568,13 +622,13 @@ pub const FITFile = struct {
         unreachable;
     }
 
-    pub fn read(this: *FITFile, T: type, little_endian: bool) !T {
+    fn read(this: *FITFile, T: type, little_endian: bool) !T {
         const ret = try this.file.reader().readInt(T, if (little_endian) std.builtin.Endian.little else std.builtin.Endian.big);
         this.bytes_read += @sizeOf(T);
         return ret;
     }
 
-    pub fn read_message(this: *FITFile) !void {
+    fn read_message(this: *FITFile) !void {
         const hdr = this.read(u8, true) catch return error.FITFileExhausted;
         if (hdr & 0x40 == 0x40) {
             const definition = try RecordDefinition.decode(this, hdr);
@@ -600,7 +654,7 @@ pub const FITFile = struct {
         }
     }
 
-    pub fn read_all(this: *FITFile) !void {
+    fn read_all(this: *FITFile) !void {
         while (this.bytes_read < this.header.data_size) {
             this.read_message() catch |err| switch (err) {
                 error.FITFileExhausted => break,

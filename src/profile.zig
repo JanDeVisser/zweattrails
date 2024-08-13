@@ -193,9 +193,6 @@ pub const FieldDef = struct {
             \\
         , .{ this.name, this.base_type.zig_type_name() });
         switch (this.base_type) {
-            inline .byte, .string => {
-                this.print("   this.@\"{s}\" = this.record.allocator.dupe(u8, v) catch unreachable;\n", .{this.name});
-            },
             inline else => {
                 if (this.scale == 1.0 and this.offset == 0) {
                     if (this.field_type == .Enumeration) {

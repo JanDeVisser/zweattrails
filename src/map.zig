@@ -150,21 +150,35 @@ pub const Atlas = struct {
     zoom: u5,
     x: u32,
     y: u32,
-    maps: ?[9][]const u8 = null,
+    width: u8,
+    height: u8,
+    columns: u8,
+    rows: u8,
+    num_tiles: u8,
+    maps: ?[][]const u8 = null,
+    allocator: ?std.mem.Allocator = null,
 
-    pub fn for_box(b: Box) Atlas {
-        var zoom: u5 = 15;
+    pub fn for_box(b: Box, width: u8, height: u8) Atlas {
+        std.debug.assert(width > 0 and width <= 8);
+        std.debug.assert(height > 0 and height <= 4);
+        const min_dim = @min(@as(u5, @truncate(width)), @as(u5, @truncate(height)));
+        var zoom: u5 = 16 - min_dim;
         const mid = b.center();
         while (zoom > 0) {
             const mid_tile = Tile.for_coordinates(mid, zoom);
             const tile_box = mid_tile.box();
             if (tile_box.width() > b.width() and tile_box.height() > b.height()) {
-                zoom += 1;
+                zoom += min_dim;
                 const t = Tile.for_coordinates(mid, zoom);
                 return Atlas{
                     .zoom = zoom,
-                    .x = t.x - 1,
-                    .y = t.y - 1,
+                    .x = t.x - width,
+                    .y = t.y - height,
+                    .width = width,
+                    .height = height,
+                    .rows = 2 * height + 1,
+                    .columns = 2 * width + 1,
+                    .num_tiles = (2 * width + 1) * (2 * height + 1),
                 };
             }
             zoom -= 1;
@@ -172,27 +186,50 @@ pub const Atlas = struct {
         unreachable;
     }
 
-    fn tile(this: Atlas, ix: usize) Tile {
-        std.debug.assert(ix < 9);
-        const i: u32 = @intCast(ix);
-        return Tile{ .zoom = this.zoom, .x = this.x + i % 3, .y = this.y + i / 3 };
+    pub fn deinit(this: *Atlas) void {
+        if (this.maps) |maps| {
+            std.debug.assert(this.allocator != null);
+            for (maps) |m| {
+                this.allocator.?.free(m);
+            }
+            this.allocator.?.free(maps);
+        }
     }
 
-    pub fn get_maps(this: *Atlas, allocator: std.mem.Allocator) ![9][]const u8 {
+    fn tile(this: Atlas, ix: usize) Tile {
+        std.debug.assert(ix < this.num_tiles);
+        const i: u32 = @intCast(ix);
+        return Tile{
+            .zoom = this.zoom,
+            .x = this.x + i % this.columns,
+            .y = this.y + i / this.columns,
+        };
+    }
+
+    fn tile_xy(this: Atlas, x: u32, y: u32) Tile {
+        std.debug.assert(x < this.columns and y < this.rows);
+        return Tile{
+            .zoom = this.zoom,
+            .x = this.x + x,
+            .y = this.y + y,
+        };
+    }
+
+    pub fn get_maps(this: *Atlas, allocator: std.mem.Allocator) ![][]const u8 {
         if (this.maps) |ret| {
             return ret;
         }
-        const maps: [9][]const u8 = undefined;
-        this.maps = maps;
-        for (0..9) |ix| {
+        this.maps = try allocator.alloc([]const u8, this.num_tiles);
+        this.allocator = allocator;
+        for (0..this.num_tiles) |ix| {
             this.maps.?[ix] = try this.tile(ix).get_map(allocator);
         }
         return this.maps.?;
     }
 
     pub fn box(this: Atlas) Box {
-        const t_sw = Tile{ .zoom = this.zoom, .x = this.x, .y = this.y + 2 };
-        const t_ne = Tile{ .zoom = this.zoom, .x = this.x + 2, .y = this.y };
+        const t_sw = this.tile_xy(0, this.rows - 1);
+        const t_ne = this.tile_xy(this.columns - 1, 0);
         return Box{ .sw = t_sw.box().sw, .ne = t_ne.box().ne };
     }
 
