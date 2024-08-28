@@ -10,8 +10,15 @@ pub const MappedType = struct {
 pub const mapped_types = [_]MappedType{
     MappedType{ .mapped_type = "date_time", .mapped_to = .uint32 },
     MappedType{ .mapped_type = "local_date_time", .mapped_to = .uint32 },
-    MappedType{ .mapped_type = "message_index", .mapped_to = .uint16 },
     MappedType{ .mapped_type = "weight", .mapped_to = .uint16 },
+};
+
+pub const non_exhaustive_enums: []const []const u8 = &[_][]const u8{
+    "device_index",
+    "manufacturer",
+    "message_index",
+    "battery_status",
+    "source_type",
 };
 
 pub const ValueDef = struct {
@@ -24,6 +31,7 @@ pub const TypeDef = struct {
     name: []const u8,
     tag_type: FITBaseType,
     values: std.ArrayList(ValueDef),
+    non_exhaustive: bool = false,
 
     var initialized = false;
     pub var types: std.StringHashMap(TypeDef) = undefined;
@@ -38,11 +46,20 @@ pub const TypeDef = struct {
         if (types.contains(name)) {
             unreachable;
         }
+        const non_exhaustive = exhaustive: {
+            inline for (non_exhaustive_enums) |non_exhaustive_enum| {
+                if (std.mem.eql(u8, non_exhaustive_enum, name)) {
+                    break :exhaustive true;
+                }
+            }
+            break :exhaustive false;
+        };
         const def = TypeDef{
             .profile = profile,
             .name = try profile.allocator.dupe(u8, name),
             .tag_type = tag_type,
             .values = std.ArrayList(ValueDef).init(profile.allocator),
+            .non_exhaustive = non_exhaustive,
         };
         try types.put(def.name, def);
         try decl_order.append(def.name);
@@ -520,14 +537,20 @@ const FITProfile = struct {
 
 pub fn handle_types(this: *FITProfile, fields: [][]const u8) void {
     if (fields.len == 0) {
-        if (this.current_type != null) {
+        if (this.current_type) |current_type| {
+            if (current_type.non_exhaustive) {
+                this.print("    _,\n", .{});
+            }
             this.print("}};\n\n", .{});
         }
         return;
     }
 
     if (fields[0].len != 0) {
-        if (this.current_type != null) {
+        if (this.current_type) |current_type| {
+            if (current_type.non_exhaustive) {
+                this.print("    _,\n", .{});
+            }
             this.print("}};\n\n", .{});
         }
         for (mapped_types) |mapped_type| {

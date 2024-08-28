@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
 
     zweattrails.step.dependOn(&gen_profile_cmd.step);
     zweattrails.linkSystemLibrary("raylib");
+    zweattrails.root_module.addImport("pg", b.dependency("pg", .{}).module("pg"));
     zweattrails.linkLibC();
     b.installArtifact(zweattrails);
 

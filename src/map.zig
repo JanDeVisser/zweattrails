@@ -21,6 +21,8 @@ pub const Coordinates = struct {
     pub fn in_box(this: Coordinates, box: Box) bool {
         return box.has(this);
     }
+
+    pub const _transient = false;
 };
 
 pub const Box = struct {
@@ -61,6 +63,8 @@ pub const Box = struct {
     pub fn has(this: Box, point: Coordinates) bool {
         return point.lat >= this.sw.lat and point.lon >= this.sw.lon and point.lat <= this.ne.lat and point.lon <= this.ne.lon;
     }
+
+    pub const _transient = false;
 };
 
 pub const Tile = struct {
@@ -150,25 +154,27 @@ pub const Atlas = struct {
     zoom: u5,
     x: u32,
     y: u32,
-    width: u8,
-    height: u8,
-    columns: u8,
-    rows: u8,
-    num_tiles: u8,
+    width: u16,
+    height: u16,
+    columns: u16,
+    rows: u16,
+    num_tiles: u16,
     maps: ?[][]const u8 = null,
     allocator: ?std.mem.Allocator = null,
+
+    pub const _transient = true;
 
     pub fn for_box(b: Box, width: u8, height: u8) Atlas {
         std.debug.assert(width > 0 and width <= 8);
         std.debug.assert(height > 0 and height <= 4);
         const min_dim = @min(@as(u5, @truncate(width)), @as(u5, @truncate(height)));
-        var zoom: u5 = 16 - min_dim;
+        var zoom: u5 = 16 - min_dim - 1;
         const mid = b.center();
         while (zoom > 0) {
             const mid_tile = Tile.for_coordinates(mid, zoom);
             const tile_box = mid_tile.box();
-            if (tile_box.width() > b.width() and tile_box.height() > b.height()) {
-                zoom += min_dim;
+            if (tile_box.width() > b.width() * 1.1 and tile_box.height() > b.height() * 1.1) {
+                zoom += min_dim - 1;
                 const t = Tile.for_coordinates(mid, zoom);
                 return Atlas{
                     .zoom = zoom,
