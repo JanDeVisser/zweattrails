@@ -6,14 +6,14 @@ pub const log = std.log.scoped(.zweattrails);
 
 pub fn get_signed_type(comptime T: type) type {
     return switch (@typeInfo(T)) {
-        inline .Int => |i| if (i.signedness == .signed) T else @Type(.{ .Int = .{ .bits = 2 * i.bits, .signedness = .signed } }),
+        inline .int => |i| if (i.signedness == .signed) T else @Type(.{ .int = .{ .bits = 2 * i.bits, .signedness = .signed } }),
         inline else => unreachable,
     };
 }
 
 pub fn get_matching(comptime T: type) type {
-    const i = @typeInfo(T).Int;
-    return @Type(.{ .Int = .{ .bits = i.bits, .signedness = if (i.signedness == .signed) .unsigned else .signed } });
+    const i = @typeInfo(T).int;
+    return @Type(.{ .int = .{ .bits = i.bits, .signedness = if (i.signedness == .signed) .unsigned else .signed } });
 }
 
 fn eq(comptime a: []const u8, comptime b: []const u8) bool {
@@ -60,23 +60,23 @@ pub const SqlText = struct {
     inline fn sql_type(this: *SqlText, comptime T: type) []const u8 {
         _ = this;
         switch (@typeInfo(T)) {
-            inline .Int => {
-                switch (@typeInfo(get_signed_type(T)).Int.bits) {
+            inline .int => {
+                switch (@typeInfo(get_signed_type(T)).int.bits) {
                     inline 8, 16 => return "smallint",
                     inline 32 => return "integer",
                     inline 64 => return "bigint",
                     inline else => unreachable,
                 }
             },
-            inline .Pointer => return "integer",
-            inline .Float => |f| {
+            inline .pointer => return "integer",
+            inline .float => |f| {
                 switch (f.bits) {
                     32 => return "real",
                     64 => return "double precision",
                     else => unreachable,
                 }
             },
-            inline .Bool => return "boolean",
+            inline .bool => return "boolean",
             inline else => unreachable,
         }
     }
@@ -86,7 +86,7 @@ pub const SqlText = struct {
             return;
         }
         switch (@typeInfo(T)) {
-            inline .Int, .Float, .Bool => {
+            inline .int, .float, .bool => {
                 if (this.fields > 0) {
                     this.append(",\n  ", .{});
                 }
@@ -99,7 +99,7 @@ pub const SqlText = struct {
                     .Insert, .Load => this.append("{s}{s}", .{ prefix, name }),
                 }
             },
-            inline .Pointer => |p| {
+            inline .pointer => |p| {
                 if (this.fields > 0) {
                     this.append(",\n  ", .{});
                 }
@@ -123,7 +123,7 @@ pub const SqlText = struct {
                     else => unreachable,
                 }
             },
-            inline .Struct => |s| {
+            inline .@"struct" => |s| {
                 if (!@hasDecl(T, "_transient") or T._transient) {
                     return;
                 }
@@ -145,7 +145,7 @@ pub const SqlText = struct {
             return;
         }
         switch (@typeInfo(FldType)) {
-            inline .Int => |i| {
+            inline .int => |i| {
                 switch (i.signedness) {
                     .unsigned => {
                         const SignedIntType = get_signed_type(FldType);
@@ -157,16 +157,16 @@ pub const SqlText = struct {
                     },
                 }
             },
-            inline .Float, .Bool => {
+            inline .float, .bool => {
                 try stmt.bind(@field(obj, name));
             },
-            inline .Pointer => |p| {
+            inline .pointer => |p| {
                 switch (p.size) {
                     inline .Slice => try stmt.bind(@field(obj, name)),
                     inline else => try stmt.bind(@field(obj.*, name).*.id),
                 }
             },
-            inline .Struct => |s| {
+            inline .@"struct" => |s| {
                 if (!@hasDecl(FldType, "_transient") or FldType._transient) {
                     return;
                 }
@@ -201,10 +201,10 @@ pub const SqlText = struct {
             return;
         }
         switch (@typeInfo(FldType)) {
-            inline .Int, .Float, .Bool => {
+            inline .int, .float, .bool => {
                 this.append(",\n  {s}{s} {s}", .{ prefix, name, this.sql_type(FldType) });
             },
-            inline .Pointer => |p| {
+            inline .pointer => |p| {
                 switch (p.size) {
                     inline .Slice => {
                         std.debug.assert(p.child == u8);
@@ -216,7 +216,7 @@ pub const SqlText = struct {
                     inline else => unreachable,
                 }
             },
-            inline .Struct => {
+            inline .@"struct" => {
                 std.debug.print("create_column {s}\n", .{name});
                 if (!@hasDecl(FldType, "_transient") or FldType._transient) {
                     std.debug.print("transient\n", .{});
@@ -230,8 +230,8 @@ pub const SqlText = struct {
     }
 
     fn create_columns(this: *SqlText, comptime T: type, prefix: []const u8) !void {
-        std.debug.assert(@typeInfo(T) == .Struct);
-        inline for (@typeInfo(T).Struct.fields) |fld| {
+        std.debug.assert(@typeInfo(T) == .@"struct");
+        inline for (@typeInfo(T).@"struct".fields) |fld| {
             try this.create_column(prefix, fld.type, fld.name);
         }
     }
@@ -256,7 +256,7 @@ pub const SqlText = struct {
     }
 
     pub fn persist(this: *SqlText, comptime T: type, obj: *T) !void {
-        std.debug.assert(@typeInfo(T) == .Struct);
+        std.debug.assert(@typeInfo(T) == .@"struct");
         std.debug.assert(!@hasDecl(T, "_transient") or !T._transient);
         try this.create_table(T);
         this.reset();
@@ -265,14 +265,14 @@ pub const SqlText = struct {
         const table_name = iter.first();
 
         if (obj.id) |_| {
-            this.append("update {s} set\n  ", .{table_name});
-            inline for (@typeInfo(T).Struct.fields) |fld| {
+            this.append("update zweattrails.{s} set\n  ", .{table_name});
+            inline for (@typeInfo(T).@"struct".fields) |fld| {
                 try this.build_sql(.Update, fld.name, fld.type, "");
             }
             this.append("\nwhere id = ${}\nreturning id", .{this.fields + 1});
         } else {
-            this.append("insert into {s} (\n", .{table_name});
-            inline for (@typeInfo(T).Struct.fields) |fld| {
+            this.append("insert into zweattrails.{s} (\n", .{table_name});
+            inline for (@typeInfo(T).@"struct".fields) |fld| {
                 try this.build_sql(.Insert, fld.name, fld.type, "");
             }
             this.append("\n) values (\n", .{});
@@ -288,7 +288,7 @@ pub const SqlText = struct {
         defer this.db.pool.release(conn);
         var stmt = try this.db.prepare(conn, this.buf.items);
         errdefer stmt.deinit();
-        inline for (@typeInfo(T).Struct.fields) |fld| {
+        inline for (@typeInfo(T).@"struct".fields) |fld| {
             try this.bind_fld(&stmt, T, obj, fld.name, fld.type);
         }
         if (obj.id) |id| {
@@ -323,7 +323,7 @@ pub const SqlText = struct {
                 @field(value, name) = @as(*align(1) const field.type, @ptrCast(dflt)).*;
             }
             switch (@typeInfo(field.type)) {
-                inline .Int => |i| {
+                inline .int => |i| {
                     switch (i.signedness) {
                         .unsigned => {
                             const SignedIntType = get_signed_type(field.type);
@@ -336,18 +336,18 @@ pub const SqlText = struct {
                     }
                     this.fields += 1;
                 },
-                inline .Float, .Bool => {
+                inline .float, .bool => {
                     @field(value, name) = row.get(field.type, this.field);
                     this.fields += 1;
                 },
-                inline .Pointer => |p| {
+                inline .pointer => |p| {
                     switch (p.size) {
                         inline .Slice => @field(value, name) = this.allocator.dupe(p.child, row.get(field.type, this.field)),
                         inline else => {},
                     }
                     this.fields += 1;
                 },
-                inline .Struct => {
+                inline .@"struct" => {
                     if (!@hasDecl(field.type, "_transient") or field.type._transient) {
                         continue;
                     }
@@ -374,7 +374,7 @@ pub const SqlText = struct {
     }
 
     pub fn query(this: SqlText, comptime T: type, column: []const u8, value: i32) !std.ArrayList(T) {
-        std.debug.assert(@typeInfo(T) == .Struct);
+        std.debug.assert(@typeInfo(T) == .@"struct");
         std.debug.assert(!@hasDecl(T, "_transient") or !T._transient);
         try this.create_table(T);
         this.reset();
@@ -383,7 +383,7 @@ pub const SqlText = struct {
         const table_name = iter.first();
 
         this.append("select id\n  ", .{});
-        inline for (@typeInfo(T).Struct.fields) |fld| {
+        inline for (@typeInfo(T).@"struct".fields) |fld| {
             try this.build_sql(.Load, fld.name, fld.type);
         }
         this.append(

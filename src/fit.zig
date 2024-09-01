@@ -13,7 +13,7 @@ const ProgramError = error{
 pub fn mesg_num_of_type(comptime MesgType: type) fittypes.mesg_num {
     var it = std.mem.splitBackwardsScalar(u8, @typeName(MesgType), '.');
     const mesg_name = it.next() orelse unreachable;
-    inline for (@typeInfo(fittypes.mesg_num).Enum.fields) |enum_fld| {
+    inline for (@typeInfo(fittypes.mesg_num).@"enum".fields) |enum_fld| {
         if (std.mem.eql(u8, mesg_name, enum_fld.name)) {
             return @enumFromInt(enum_fld.value);
         }
@@ -120,7 +120,7 @@ const RecordDefinition = struct {
         var mesg_type: []const u8 = "Vendor";
 
         if (global_message_number < @intFromEnum(fittypes.mesg_num.mfg_range_min)) {
-            inline for (@typeInfo(fittypes.mesg_num).Enum.fields) |enum_fld| {
+            inline for (@typeInfo(fittypes.mesg_num).@"enum".fields) |enum_fld| {
                 if (enum_fld.value == global_message_number) {
                     mesg_num = @enumFromInt(global_message_number);
                     mesg_type = enum_fld.name;
@@ -190,7 +190,7 @@ const RecordDefinition = struct {
     }
 
     pub fn get_message_type(this: RecordDefinition) ?type {
-        inline for (@typeInfo(fittypes.mesg_num).Enum.fields) |fld| {
+        inline for (@typeInfo(fittypes.mesg_num).@"enum".fields) |fld| {
             if (fld.value == this.global_message_number) {
                 return @field(fittypes, fld.name);
             }
@@ -428,7 +428,7 @@ pub const DataRecord = struct {
             .fields = try fitfile.allocator.alloc(DataField, def.fields.len),
         };
         for (def.fields, 0..) |fld, ix| {
-            inline for (@typeInfo(FITBaseType).Enum.fields) |enum_value| {
+            inline for (@typeInfo(FITBaseType).@"enum".fields) |enum_value| {
                 const bt: FITBaseType = @enumFromInt(enum_value.value);
                 if (bt == fld.base_type) {
                     const T = bt.zig_type();
@@ -501,7 +501,7 @@ pub const DataRecord = struct {
             .fields = try fitfile.allocator.alloc(DataField, def.fields.len),
         };
         for (def.fields, 0..) |fld, ix| {
-            inline for (@typeInfo(FITBaseType).Enum.fields) |enum_value| {
+            inline for (@typeInfo(FITBaseType).@"enum".fields) |enum_value| {
                 const bt: FITBaseType = @enumFromInt(enum_value.value);
                 if (bt == fld.base_type) {
                     ret.fields[ix] = try DataRecord.read_field(fitfile, bt, fld, new_timestamp, local_message_type);
@@ -520,7 +520,7 @@ pub const DataRecord = struct {
 
     fn create_message_by_name(this: DataRecord, comptime name: []const u8) !fittypes.FITMessage {
         count += 1;
-        inline for (@typeInfo(fittypes).Struct.decls) |decl| {
+        inline for (@typeInfo(fittypes).@"struct".decls) |decl| {
             if (std.mem.eql(u8, decl.name, name) and @hasField(fittypes.FITMessage, decl.name)) {
                 return @unionInit(fittypes.FITMessage, decl.name, try @field(fittypes, decl.name).init(this));
             }
@@ -532,7 +532,7 @@ pub const DataRecord = struct {
         const mesg_num = this.definition.mesg_num orelse {
             return error.UnknownMessage;
         };
-        inline for (@typeInfo(fittypes.mesg_num).Enum.fields) |enum_fld| {
+        inline for (@typeInfo(fittypes.mesg_num).@"enum".fields) |enum_fld| {
             if (enum_fld.value == @intFromEnum(mesg_num)) {
                 return this.create_message_by_name(enum_fld.name);
             }

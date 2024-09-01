@@ -64,7 +64,7 @@ pub const FITBaseType = enum(u8) {
     }
 
     pub fn get(type_name: []const u8) ?FITBaseType {
-        inline for (@typeInfo(FITBaseType).Enum.fields) |fld| {
+        inline for (@typeInfo(FITBaseType).@"enum".fields) |fld| {
             if (std.mem.eql(u8, fld.name, type_name)) {
                 return @enumFromInt(fld.value);
             }
@@ -73,7 +73,7 @@ pub const FITBaseType = enum(u8) {
     }
 
     pub fn from_int(base_type_int: u8) ?FITBaseType {
-        inline for (@typeInfo(FITBaseType).Enum.fields) |fld| {
+        inline for (@typeInfo(FITBaseType).@"enum".fields) |fld| {
             if (fld.value == base_type_int) {
                 return @enumFromInt(fld.value);
             }
