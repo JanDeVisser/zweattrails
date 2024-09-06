@@ -364,6 +364,7 @@ const FITProfile = struct {
     types: std.StringArrayHashMap(TypeDef),
     messages: std.ArrayList(MessageDef),
     configured_messages: std.ArrayList([]const u8),
+    all_messages: std.ArrayList([]const u8),
     out_filename: []const u8,
     out_file: std.fs.File,
     current_type: ?*TypeDef = null,
@@ -378,6 +379,7 @@ const FITProfile = struct {
             .types = std.StringArrayHashMap(TypeDef).init(allocator),
             .messages = std.ArrayList(MessageDef).init(allocator),
             .configured_messages = std.ArrayList([]const u8).init(allocator),
+            .all_messages = std.ArrayList([]const u8).init(allocator),
             .out_filename = out_filename,
             .out_file = out_file,
         };
@@ -410,6 +412,7 @@ const FITProfile = struct {
         profile.types.deinit();
         profile.messages.deinit();
         profile.configured_messages.deinit();
+        profile.all_messages.deinit();
     }
 
     pub fn print(this: FITProfile, comptime fmt: []const u8, args: anytype) void {
@@ -516,6 +519,7 @@ pub fn new_message(this: *FITProfile, tokens: csv.CSVRow) !void {
             }
         }
     }
+    this.all_messages.append(this.allocator.dupe(u8, tokens.fields[0]) catch unreachable) catch unreachable;
     if (this.configured_messages.items.len > 0 and !configured) {
         this.current_message = null;
         return;

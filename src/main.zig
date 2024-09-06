@@ -76,7 +76,7 @@ pub const Record = struct {
     }
 
     pub fn store(this: *Record, db: zorro.Db) !void {
-        var txt = zorro.SqlText.init(db);
+        var txt = zorro.Zorro.init(db);
         defer txt.deinit();
         txt.persist(Record, this);
     }
@@ -165,11 +165,11 @@ pub const Session = struct {
     }
 
     fn store(this: *Session, db: zorro.Db) !void {
-        var txt = zorro.SqlText.init(db);
+        var txt = zorro.Zorro.init(db);
         defer txt.deinit();
-        txt.persist(Session, this);
-        for (this.records) |r| {
-            r.persist(db);
+        try txt.persist(Session, this);
+        for (this.records.items) |*r| {
+            try txt.persist(Record, r);
         }
     }
 
@@ -348,20 +348,22 @@ pub const Activity = struct {
     start_time: u32,
     serial_number: u32,
 
-    pub fn import(filename: []const u8, allocator: std.mem.Allocator) !Activity {
-        const fitfile = try fit.FITFile.init(allocator, filename);
+    pub fn import(dir: std.fs.Dir, filename: []const u8, allocator: std.mem.Allocator) !Activity {
+        const fitfile = try fit.FITFile.init(allocator, dir, filename);
+        std.debug.print("#messages: {}\n", .{fitfile.messages.items.len});
         var sessions = std.ArrayList(Session).init(allocator);
         var serial_number: u32 = undefined;
         var records = std.ArrayList(Record).init(allocator);
         for (fitfile.messages.items) |message| {
             switch (message) {
                 inline .file_id => |f| {
+                    std.debug.print("File, #records: {}\n", .{sessions.items.len});
                     serial_number = f.serial_number;
                 },
                 inline .session => |s| {
+                    std.debug.print("Session, #records: {}\n", .{records.items.len});
                     try sessions.append(try Session.init(s, allocator));
-                    var session = &sessions.items[sessions.items.len - 1];
-                    try session.append_all(records);
+                    try sessions.items[sessions.items.len - 1].append_all(records);
                     records.clearAndFree();
                 },
                 inline .record => |record| {
@@ -388,14 +390,40 @@ pub const Activity = struct {
         this.sessions.deinit();
     }
 
+    pub fn query(allocator: std.mem.Allocator, db: zorro.Db) ![]Activity {
+        var conn = try db.pool.acquire();
+        defer conn.deinit();
+
+        var result = try conn.queryOpts("select * from activity", .{}, .{ .column_names = true });
+        defer result.deinit();
+        while (result.next()) |row| {
+            var ret: Activity = row.to(Activity, .{ .map = .name });
+            ret.allocator = allocator;
+            ret.sessions = std.ArrayList(Session).init(allocator);
+            {
+                const sessions = try conn.queryOpts("select * from session", .{}, .{ .column_names = true });
+                defer sessions.deinit();
+                while (try result.next()) |session_row| {
+                    const session = try Session.load(ret, session_row);
+                    ret.sessions.append(session);
+                }
+            }
+        }
+    }
+
     pub fn load(id: u32, allocator: std.mem.Allocator, db: zorro.Db) !Activity {
         var conn = try db.pool.acquire();
         defer conn.deinit();
 
+        var z = zorro.Zorro(db);
+        defer z.deinit();
+        var ret = z.load(Activity, id);
+
         const row_maybe = conn.rowOpts("select * from activity where id = $1", .{id}, .{ .column_names = true });
         if (row_maybe) |row| {
             defer row.deinit();
-            var ret: Activity = row.to(Activity, .{ .map = .name });
+            var ret: Activity =
+                row.to(Activity, .{ .map = .name });
             ret.allocator = allocator;
             ret.sessions = std.ArrayList(Session).init(allocator);
             {
@@ -428,73 +456,271 @@ pub const Activity = struct {
     }
 
     fn store(this: *Activity, db: zorro.Db) !void {
-        var txt = zorro.SqlText.init(db);
+        var txt = zorro.Zorro.init(db);
         defer txt.deinit();
         try txt.persist(Activity, this);
         for (this.sessions.items) |*s| {
-            try txt.persist(Session, s);
+            try s.store(db);
         }
     }
 };
 
-const _ = zorro.Db.register_type([]const type);
+pub const Import = struct {
+    db: zorro.Db,
+    allocator: std.mem.Allocator,
+    done: std.ArrayList([]const u8),
+    errors: std.StringArrayHashMap([]const u8),
+    status: union(enum) { Start: void, Idle: void, Processing: void, Importing: []const u8, Crashed: struct {
+        filename: []const u8,
+        message: []const u8,
+    } } = .Start,
+    thread: std.Thread = undefined,
+    inbox_d: std.fs.Dir,
+    done_d: std.fs.Dir,
+    errors_d: std.fs.Dir,
 
-pub fn show_gui(allocator: std.mem.Allocator, activity: *Activity) !void {
-    _ = allocator;
-    var session = &activity.sessions.items[0];
+    pub fn init(db: zorro.Db, rebuild: bool) !Import {
+        const allocator = std.heap.c_allocator;
+        const app_dir = try std.fs.getAppDataDir(allocator, "zweattrails");
+        std.fs.makeDirAbsolute(app_dir) catch |err| {
+            if (err != std.posix.MakeDirError.PathAlreadyExists) {
+                return err;
+            }
+        };
+        var d = try std.fs.openDirAbsolute(app_dir, .{});
+        defer d.close();
 
-    const screenWidth = 1550;
-    const screenHeight = 1024;
+        if (rebuild) {
+            try d.deleteTree("inbox");
+            try d.rename("done", "inbox");
+        }
 
-    ray.InitWindow(screenWidth, screenHeight, "Zweattrails");
-    defer ray.CloseWindow();
-
-    const font = ray.LoadFontEx("VictorMono-Medium.ttf", 20, null, 0);
-    defer ray.UnloadFont(font);
-
-    const map_img = try session.map_image();
-    const map_texture = ray.LoadTextureFromImage(map_img);
-    defer ray.UnloadTexture(map_texture);
-    ray.UnloadImage(map_img);
-
-    std.debug.print("map_img.height: {}\n", .{map_img.height});
-    std.debug.print("map_img.height casted: {}\n", .{@as(u32, @bitCast(map_img.height))});
-    std.debug.print("screenHeight {}\n", .{screenHeight});
-    std.debug.print("screenHeight - map_img.height {}\n", .{screenHeight - @as(u32, @bitCast(map_img.height))});
-    const graph_img = try session.graph_image(@intCast(screenWidth - 40), screenHeight - @as(u32, @bitCast(map_img.height)) - 60);
-    const graph_texture = ray.LoadTextureFromImage(graph_img);
-    defer ray.UnloadTexture(graph_texture);
-    ray.UnloadImage(graph_img);
-
-    ray.SetTargetFPS(60);
-
-    var frame: u32 = 0;
-    while (!ray.WindowShouldClose()) {
-        defer frame += 1;
-        ray.BeginDrawing();
-        defer ray.EndDrawing();
-
-        ray.ClearBackground(ray.DARKGRAY);
-        ray.DrawTexture(map_texture, 20, 20, ray.WHITE);
-        ray.DrawTexture(graph_texture, 20, map_texture.height + 40, ray.WHITE);
-
-        var buf: [128]u8 = undefined;
-        var st: libC.tm = undefined;
-        const st64: c_long = @intCast(activity.start_time);
-        _ = libC.localtime_r(&st64, &st);
-        const t = TimeOfDay.from_float(session.elapsed_time);
-        ray.DrawTextEx(font, try std.fmt.bufPrintZ(&buf, "Start time    : {:02}:{:02}", .{ @as(u32, @bitCast(st.tm_hour)), @as(u32, @bitCast(st.tm_min)) }), ray.Vector2{ .x = @floatFromInt(map_texture.width + 40), .y = 40 }, 20, 1.0, ray.RAYWHITE);
-        ray.DrawTextEx(font, try std.fmt.bufPrintZ(&buf, "Total distance: {d:.3}km", .{session.distance / 1000.0}), ray.Vector2{ .x = @floatFromInt(map_texture.width + 40), .y = 40 + 20 * 1.2 }, 20, 1.0, ray.RAYWHITE);
-        ray.DrawTextEx(font, try std.fmt.bufPrintZ(&buf, "Elapsed time  : {}", .{t}), ray.Vector2{ .x = @floatFromInt(map_texture.width + 40), .y = 40 + 2 * 20 * 1.2 }, 20, 1.0, ray.RAYWHITE);
+        return .{
+            .db = db,
+            .allocator = allocator,
+            .done = std.ArrayList([]const u8).init(allocator),
+            .errors = std.StringArrayHashMap([]const u8).init(allocator),
+            .inbox_d = try d.makeOpenPath("inbox", .{}),
+            .done_d = try d.makeOpenPath("done", .{}),
+            .errors_d = try d.makeOpenPath("errors", .{}),
+        };
     }
-}
+
+    pub fn deinit(this: *Import) void {
+        this.inbox_d.close();
+        this.done_d.close();
+        this.errors_d.close();
+        for (this.done.items) |d| {
+            this.allocator.free(d);
+        }
+        this.done.deinit();
+        var it = this.errors.iterator();
+        while (it.next()) |entry| {
+            this.allocator.free(entry.key_ptr.*);
+            this.allocator.free(entry.value_ptr.*);
+        }
+        this.errors.deinit();
+    }
+
+    fn import_file(this: *Import, filename: []const u8) !void {
+        this.status = .{ .Importing = filename };
+        defer this.status = .{ .Processing = void{} };
+        var activity = try Activity.import(this.inbox_d, filename, this.allocator);
+        defer activity.deinit();
+        activity.store(this.db) catch |err| {
+            try this.errors.put(try this.allocator.dupe(u8, filename), try std.fmt.allocPrint(this.allocator, "{any}", .{err}));
+            try std.fs.rename(this.inbox_d, filename, this.errors_d, filename);
+            return err;
+        };
+        try this.done.append(try this.allocator.dupe(u8, filename));
+        try std.fs.rename(this.inbox_d, filename, this.done_d, filename);
+    }
+
+    pub fn run(this: *Import) void {
+        while (true) {
+            defer std.time.sleep(1e9);
+            if (this.status != .Idle and this.status != .Start) {
+                return;
+            }
+            var it = this.inbox_d.iterate();
+            if (it.next() catch @panic("Wut")) |_| {
+                this.status = .{ .Processing = void{} };
+                defer this.status = .{ .Idle = void{} };
+                it.reset();
+                while (it.next() catch @panic("Wut?")) |f| {
+                    if (std.mem.endsWith(u8, f.name, ".fit") or std.mem.endsWith(u8, f.name, ".FIT")) {
+                        this.import_file(f.name) catch |err| {
+                            this.status = .{ .Crashed = .{
+                                .filename = this.allocator.dupe(u8, f.name) catch @panic("Out of memory"),
+                                .message = std.fmt.allocPrint(this.allocator, "{any}", .{err}) catch @panic("Out of memory"),
+                            } };
+                            return;
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn start(this: *Import) !void {
+        this.thread = try std.Thread.spawn(.{}, Import.run, .{this});
+        this.thread.detach();
+    }
+
+    pub fn restart(this: *Import) void {
+        switch (this.status) {
+            .Idle, .Running => {},
+            .Crashed => |c| {
+                this.allocator.free(c.filename);
+                this.allocator.free(c.message);
+                this.status = .{ .Idle = void{} };
+            },
+        }
+    }
+};
+
+pub const GUI = struct {
+    allocator: std.mem.Allocator,
+    db: zorro.Db,
+    font: ray.Font = undefined,
+    state: union(enum) { Importing: void, List: void, Display: struct {
+        activity: Activity,
+        map_texture: ray.Texture2D,
+        graph_texture: ray.Texture2D,
+    } },
+    importer: *Import,
+    screenWidth: i32 = 1550,
+    screenHeight: i32 = 1024,
+
+    pub const State = enum {
+        Importing,
+        List,
+        Display,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, db: zorro.Db, importer: *Import) !GUI {
+        return .{
+            .allocator = allocator,
+            .db = db,
+            .state = .Importing,
+            .importer = importer,
+        };
+    }
+
+    pub fn deinit(this: *GUI) void {
+        this.leave_state() catch |err| std.debug.print("Error deallocating GUI: {any}\n", .{err});
+    }
+
+    pub fn show(this: *GUI) !void {
+        ray.InitWindow(this.screenWidth, this.screenHeight, "Zweattrails");
+        defer ray.CloseWindow();
+
+        this.font = ray.LoadFontEx("VictorMono-Medium.ttf", 20, null, 0);
+        defer ray.UnloadFont(this.font);
+
+        try this.importer.start();
+
+        ray.SetTargetFPS(60);
+
+        var frame: u32 = 0;
+        while (!ray.WindowShouldClose()) {
+            defer frame += 1;
+            ray.BeginDrawing();
+            defer ray.EndDrawing();
+
+            ray.ClearBackground(ray.DARKGRAY);
+            switch (this.state) {
+                .Importing => try this.render_import_state(),
+                .Display => try this.render_display_state(),
+                else => {},
+            }
+        }
+    }
+
+    fn render_import_state(this: *GUI) !void {
+        switch (this.state) {
+            .Importing => {
+                var buf: [128]u8 = undefined;
+                const label = switch (this.importer.status) {
+                    .Start => "Start",
+                    .Importing => |filename| filename,
+                    .Processing => "Processing . . .",
+                    .Idle => "<Idle>",
+                    .Crashed => |c| try std.fmt.bufPrintZ(&buf, "Crashed processing {s}: {s}", .{ c.filename, c.message }),
+                };
+                ray.DrawTextEx(this.font, try std.fmt.bufPrintZ(&buf, "Progress             : {s}", .{label}), ray.Vector2{ .x = 40, .y = 40 }, 20, 1.0, ray.RAYWHITE);
+                ray.DrawTextEx(this.font, try std.fmt.bufPrintZ(&buf, "Successfully imported: {}", .{this.importer.done.items.len}), ray.Vector2{ .x = 40, .y = 40 + 20 * 1.2 }, 20, 1.0, ray.RAYWHITE);
+                ray.DrawTextEx(this.font, try std.fmt.bufPrintZ(&buf, "Errors               : {}", .{this.importer.errors.count()}), ray.Vector2{ .x = 40, .y = 40 + 2 * 20 * 1.2 }, 20, 1.0, ray.RAYWHITE);
+
+                if (this.importer.status == .Idle) {
+                    try this.leave_state();
+                    this.state = .{ .List = void{} };
+                }
+            },
+            else => std.debug.panic("render_import_state called while in state {s}", .{@tagName(this.state)}),
+        }
+    }
+
+    fn render_display_state(this: *GUI) !void {
+        switch (this.state) {
+            .Display => |d| {
+                const session = d.activity.sessions.items[0];
+                ray.DrawTexture(d.map_texture, 20, 20, ray.WHITE);
+                ray.DrawTexture(d.graph_texture, 20, d.map_texture.height + 40, ray.WHITE);
+
+                var buf: [128]u8 = undefined;
+                var st: libC.tm = undefined;
+                const st64: c_long = @intCast(d.activity.start_time);
+                _ = libC.localtime_r(&st64, &st);
+                const t = TimeOfDay.from_float(session.elapsed_time);
+                ray.DrawTextEx(this.font, try std.fmt.bufPrintZ(&buf, "Start time    : {:02}:{:02}", .{ @as(u32, @bitCast(st.tm_hour)), @as(u32, @bitCast(st.tm_min)) }), ray.Vector2{ .x = @floatFromInt(d.map_texture.width + 40), .y = 40 }, 20, 1.0, ray.RAYWHITE);
+                ray.DrawTextEx(this.font, try std.fmt.bufPrintZ(&buf, "Total distance: {d:.3}km", .{session.distance / 1000.0}), ray.Vector2{ .x = @floatFromInt(d.map_texture.width + 40), .y = 40 + 20 * 1.2 }, 20, 1.0, ray.RAYWHITE);
+                ray.DrawTextEx(this.font, try std.fmt.bufPrintZ(&buf, "Elapsed time  : {}", .{t}), ray.Vector2{ .x = @floatFromInt(d.map_texture.width + 40), .y = 40 + 2 * 20 * 1.2 }, 20, 1.0, ray.RAYWHITE);
+            },
+            else => std.debug.panic("render_display_state called while in state {s}", .{@tagName(this.state)}),
+        }
+    }
+
+    fn leave_state(this: *GUI) !void {
+        switch (this.state) {
+            .Display => |*d| {
+                d.activity.deinit();
+                ray.UnloadTexture(d.map_texture);
+                ray.UnloadTexture(d.graph_texture);
+            },
+            else => {},
+        }
+    }
+
+    fn load_activity(this: *GUI, activity_id: i32) !void {
+        const activity = try Activity.load(activity_id, this.allocator, this.db);
+        const session = activity.sessions.items[0];
+        const map_img = try session.map_image();
+        const map_texture = ray.LoadTextureFromImage(map_img);
+        ray.UnloadImage(map_img);
+
+        std.debug.print("map_img.height: {}\n", .{map_img.height});
+        std.debug.print("map_img.height casted: {}\n", .{@as(u32, @bitCast(map_img.height))});
+        std.debug.print("screenHeight {}\n", .{this.screenHeight});
+        std.debug.print("screenHeight - map_img.height {}\n", .{this.screenHeight - @as(u32, @bitCast(map_img.height))});
+        const graph_img = try session.graph_image(@intCast(this.screenWidth - 40), this.screenHeight - @as(u32, @bitCast(map_img.height)) - 60);
+        const graph_texture = ray.LoadTextureFromImage(graph_img);
+        ray.UnloadImage(graph_img);
+
+        this.state = .{ .Display = .{
+            .activity = activity,
+            .map_texture = map_texture,
+            .graph_texture = graph_texture,
+        } };
+    }
+};
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
     defer arena.deinit();
 
-    const args = try std.process.argsAlloc(allocator);
+    // const args = try std.process.argsAlloc(allocator);
     // if (args.len != 2) {
     //     std.log.err(
     //         "Incorrect number of arguments: wanted 2, got {d}",
@@ -502,13 +728,15 @@ pub fn main() !void {
     //     );
     //     return ProgramError.WrongAmountOfArguments;
     // }
-    const filename = if (args.len == 2) args[1] else "Easy_Wednesday_Workout_Neg_Split_Intervals.fit";
 
     var db = try zorro.Db.init(allocator, true);
     defer db.deinit();
-    var activity = try Activity.import(filename, allocator);
-    defer activity.deinit();
-    try activity.store(db);
 
-    //try show_gui(allocator, &activity);
+    var import = try Import.init(db, true);
+    defer import.deinit();
+    try import.start();
+
+    var gui = try GUI.init(allocator, db, &import);
+    defer gui.deinit();
+    try gui.show();
 }

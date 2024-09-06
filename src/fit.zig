@@ -520,9 +520,10 @@ pub const DataRecord = struct {
 
     fn create_message_by_name(this: DataRecord, comptime name: []const u8) !fittypes.FITMessage {
         count += 1;
-        inline for (@typeInfo(fittypes).@"struct".decls) |decl| {
-            if (std.mem.eql(u8, decl.name, name) and @hasField(fittypes.FITMessage, decl.name)) {
-                return @unionInit(fittypes.FITMessage, decl.name, try @field(fittypes, decl.name).init(this));
+        std.debug.print("create_message_by_name {s}\n", .{name});
+        inline for (@typeInfo(fittypes.FITMessage).@"union".fields) |fld| {
+            if (std.mem.eql(u8, fld.name, name)) {
+                return @unionInit(fittypes.FITMessage, name, if (@hasDecl(fittypes, name)) try @field(fittypes, name).init(this) else void{});
             }
         }
         unreachable;
@@ -553,10 +554,14 @@ pub const FITFile = struct {
     header: FITHeader = undefined,
     bytes_read: usize,
 
-    pub fn init(allocator: std.mem.Allocator, filename: []const u8) !FITFile {
+    pub fn init(allocator: std.mem.Allocator, dir: ?std.fs.Dir, filename: []const u8) !FITFile {
         var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fs.realpath(filename, &path_buffer);
-        const file = try std.fs.openFileAbsolute(path, .{});
+        const file = if (dir) |d|
+            try d.openFile(filename, .{})
+        else blk: {
+            const path = try std.fs.realpath(filename, &path_buffer);
+            break :blk try std.fs.openFileAbsolute(path, .{});
+        };
         defer file.close();
         var ret = FITFile{
             .allocator = allocator,
