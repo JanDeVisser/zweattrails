@@ -488,7 +488,6 @@ pub fn Zorro(comptime T: type) type {
                     1 => {},
                     else => return error.ObjIdNotUnique,
                 }
-                Tx.add(Entity, obj);
                 _ = this.set_id(obj.id);
             }
 
